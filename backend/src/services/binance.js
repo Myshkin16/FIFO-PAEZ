@@ -6,6 +6,10 @@ const { getPriceEur } = require('./prices');
 // Stablecoins treated as fiat-equivalent quote currencies for price lookups
 const USD_STABLES = new Set(['USDT', 'USDC', 'BUSD', 'TUSD', 'FDUSD', 'DAI']);
 
+// Real-world fiat currencies. These are NOT taxable crypto assets, so when
+// they appear as the BASE side of a trade we skip emitting that leg.
+const FIAT_CURRENCIES = new Set(['EUR', 'USD', 'GBP', 'CHF']);
+
 /**
  * Parses a Binance CSV buffer and returns an array of normalised transaction
  * objects. Auto-detects between two formats:
@@ -296,34 +300,39 @@ async function parseTransactionHistory(text) {
     // Use the earliest tiempo for the timestamp
     const tiempo = first.tiempo <= mate.tiempo ? first.tiempo : mate.tiempo;
 
-    // Emit a SELL of the negative side and a BUY of the positive side
-    const sellTx = await buildTrade({
-      type:        'SELL',
-      base:        negRow.moneda,
-      baseAmount:  -negRow.cambio,
-      quoteMoneda: posRow.moneda,
-      quoteAmount: posRow.cambio,
-      baseFeeAmount: 0,
-      otherFeeContribs: [],
-      tiempo,
-      idSuffix: results.length,
-      rawPair: 'CONVERT',
-    });
-    results.push(sellTx);
+    // Emit a SELL of the negative side and a BUY of the positive side,
+    // skipping any leg where the BASE asset is fiat (not a taxable crypto).
+    if (!FIAT_CURRENCIES.has(negRow.moneda)) {
+      const sellTx = await buildTrade({
+        type:        'SELL',
+        base:        negRow.moneda,
+        baseAmount:  -negRow.cambio,
+        quoteMoneda: posRow.moneda,
+        quoteAmount: posRow.cambio,
+        baseFeeAmount: 0,
+        otherFeeContribs: [],
+        tiempo,
+        idSuffix: results.length,
+        rawPair: 'CONVERT',
+      });
+      results.push(sellTx);
+    }
 
-    const buyTx = await buildTrade({
-      type:        'BUY',
-      base:        posRow.moneda,
-      baseAmount:  posRow.cambio,
-      quoteMoneda: negRow.moneda,
-      quoteAmount: -negRow.cambio,
-      baseFeeAmount: 0,
-      otherFeeContribs: [],
-      tiempo,
-      idSuffix: results.length,
-      rawPair: 'CONVERT',
-    });
-    results.push(buyTx);
+    if (!FIAT_CURRENCIES.has(posRow.moneda)) {
+      const buyTx = await buildTrade({
+        type:        'BUY',
+        base:        posRow.moneda,
+        baseAmount:  posRow.cambio,
+        quoteMoneda: negRow.moneda,
+        quoteAmount: -negRow.cambio,
+        baseFeeAmount: 0,
+        otherFeeContribs: [],
+        tiempo,
+        idSuffix: results.length,
+        rawPair: 'CONVERT',
+      });
+      results.push(buyTx);
+    }
   }
 
   return results;
@@ -351,7 +360,60 @@ async function pairTradeRows(args) {
   const { type, baseRows, counterRows, feeRows, tiempo, startIdSuffix } = args;
   const baseSet = new Set(baseRows.map(r => r.moneda));
 
+  // Counter side: SELL of base => BUY of counter; BUY of base => SELL of counter
+  const counterType = type === 'BUY' ? 'SELL' : 'BUY';
+
   const out = [];
+
+  // Helper: emit base-side trade (skip if base is fiat) plus counter-side
+  // trade (skip if counter is fiat) and append to `out`.
+  const pushPair = async (params) => {
+    const {
+      base, baseAmount, quoteMoneda, quoteAmount,
+      baseFeeAmount, otherFeeContribs,
+    } = params;
+
+    // ---- Base side ----
+    if (!FIAT_CURRENCIES.has(base)) {
+      out.push(await buildTrade({
+        type,
+        base,
+        baseAmount,
+        quoteMoneda,
+        quoteAmount,
+        baseFeeAmount,
+        otherFeeContribs,
+        tiempo,
+        idSuffix: startIdSuffix + out.length,
+      }));
+    }
+
+    // ---- Counter side (only when counter is not fiat) ----
+    if (quoteMoneda && !FIAT_CURRENCIES.has(quoteMoneda)) {
+      // From the counter's perspective, the original base becomes its quote.
+      // Fees attributable to this leg: counter-asset fees + the share of
+      // other fees we already carry (we pass them through unchanged so the
+      // EUR cost is reflected once on each leg consistently).
+      const counterBaseFee = feeRows
+        .filter(f => f.moneda === quoteMoneda)
+        .reduce((s, f) => s + Math.abs(f.cambio), 0);
+
+      const counterOtherFees = otherFeeContribs.filter(f => f.moneda !== quoteMoneda);
+
+      out.push(await buildTrade({
+        type:        counterType,
+        base:        quoteMoneda,
+        baseAmount:  quoteAmount,
+        quoteMoneda: base,
+        quoteAmount: baseAmount,
+        baseFeeAmount: counterBaseFee,
+        otherFeeContribs: counterOtherFees,
+        tiempo,
+        idSuffix: startIdSuffix + out.length,
+        rawPair: `${quoteMoneda}/${base}`,
+      }));
+    }
+  };
 
   if (baseSet.size === 1) {
     // ---- Single base: aggregate ----
@@ -371,17 +433,10 @@ async function pairTradeRows(args) {
       .filter(f => f.moneda !== base)
       .map(f => ({ moneda: f.moneda, amount: Math.abs(f.cambio) }));
 
-    out.push(await buildTrade({
-      type,
-      base,
-      baseAmount,
-      quoteMoneda,
-      quoteAmount,
-      baseFeeAmount,
-      otherFeeContribs,
-      tiempo,
-      idSuffix: startIdSuffix + out.length,
-    }));
+    await pushPair({
+      base, baseAmount, quoteMoneda, quoteAmount,
+      baseFeeAmount, otherFeeContribs,
+    });
     return out;
   }
 
@@ -418,17 +473,14 @@ async function pairTradeRows(args) {
       .filter(f => !baseSet.has(f.moneda))
       .map(f => ({ moneda: f.moneda, amount: Math.abs(f.cambio) * share }));
 
-    out.push(await buildTrade({
-      type,
+    await pushPair({
       base,
       baseAmount:  acc.baseAmount,
       quoteMoneda: acc.quoteMoneda,
       quoteAmount: acc.quoteAmount,
       baseFeeAmount,
       otherFeeContribs,
-      tiempo,
-      idSuffix: startIdSuffix + out.length,
-    }));
+    });
   }
 
   return out;
@@ -464,18 +516,29 @@ async function buildTrade(args) {
 
   if (base === 'EUR') {
     // EUR-as-base (e.g. user sold EUR for USDT to enter crypto). Treat as
-    // 1:1 EUR pricing — total_eur is just the EUR amount.
+    // 1:1 EUR pricing — total_eur is just the EUR amount. (Note: the Spanish
+    // parser now skips EUR-as-base entirely; this branch remains for safety.)
     priceEur = 1;
     totalEur = baseAmount;
   } else if (quoteMoneda === 'EUR') {
+    // Counter is EUR — derive price directly from the actual trade ratio
     totalEur  = quoteAmount;
     priceEur  = baseAmount > 0 ? totalEur / baseAmount : 0;
   } else if (USD_STABLES.has(quoteMoneda)) {
-    // Lookup EUR price for the BASE asset
-    priceEur = await safePriceEur(base, dateStr);
-    totalEur = baseAmount * priceEur;
+    // Counter is a USD stablecoin — convert via the stablecoin's EUR price
+    // for that date so the per-unit base price reflects the actual trade
+    // ratio, not whatever CoinGecko thinks the base traded for.
+    const stableEur = await safePriceEur(quoteMoneda, dateStr);
+    totalEur = quoteAmount * stableEur;
+    priceEur = baseAmount > 0 ? totalEur / baseAmount : 0;
+    // Fallback: if the stablecoin price lookup failed (returned 0), fall back
+    // to a direct base lookup to avoid a zero-valued trade.
+    if (!priceEur) {
+      priceEur = await safePriceEur(base, dateStr);
+      totalEur = baseAmount * priceEur;
+    }
   } else {
-    // Crypto-to-crypto — lookup EUR price for the base asset
+    // Crypto-to-crypto (non-stable) — lookup EUR price for the base asset
     priceEur = await safePriceEur(base, dateStr);
     totalEur = baseAmount * priceEur;
   }
