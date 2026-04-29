@@ -24,6 +24,18 @@ apiRouter.get('/health', (_req, res) => {
 
 app.use('/api', apiRouter);
 
+// Feature routes
+app.use('/api/config', require('./routes/config'));
+app.use('/api/import', require('./routes/import'));
+app.use('/api/fifo',   require('./routes/fifo'));
+app.use('/api/export', require('./routes/export'));
+
+// Global error handler
+app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+  console.error(err.message);
+  res.status(500).json({ error: err.message || 'Internal server error' });
+});
+
 // Start server
 const PORT = process.env.PORT || 3001;
 const server = app.listen(PORT, () => {
