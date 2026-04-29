@@ -15,46 +15,23 @@ const upload = multer({ storage: multer.memoryStorage() });
 // Shared DB helpers
 // ---------------------------------------------------------------------------
 
-const stmtExists = db.prepare('SELECT 1 FROM transactions WHERE id = ?');
-const stmtUpsert = db.prepare(`
-  INSERT OR REPLACE INTO transactions
-    (id, source, type, crypto, amount, price_eur, total_eur, fee_eur, date, raw_pair)
-  VALUES
-    (@id, @source, @type, @crypto, @amount, @price_eur, @total_eur, @fee_eur, @date, @raw_pair)
-`);
+const stmtInsert = db.prepare(`INSERT OR IGNORE INTO transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`);
 
 /**
  * Inserts an array of transaction objects, returning {imported, skipped}.
  */
 function bulkInsert(txs) {
-  let imported = 0;
-  let skipped  = 0;
-
-  const run = db.transaction(() => {
+  const insertMany = db.transaction((txs) => {
+    let imported = 0, skipped = 0;
     for (const tx of txs) {
-      const exists = stmtExists.get(tx.id);
-      if (exists) {
-        skipped++;
-      } else {
-        stmtUpsert.run({
-          id:        tx.id,
-          source:    tx.source,
-          type:      tx.type,
-          crypto:    tx.crypto,
-          amount:    tx.amount,
-          price_eur: tx.price_eur,
-          total_eur: tx.total_eur,
-          fee_eur:   tx.fee_eur   || 0,
-          date:      tx.date,
-          raw_pair:  tx.raw_pair  || null,
-        });
-        imported++;
-      }
+      const result = stmtInsert.run(tx.id, tx.source, tx.type, tx.crypto, tx.amount, tx.price_eur, tx.total_eur, tx.fee_eur, tx.date, tx.raw_pair || null);
+      if (result.changes === 1) imported++;
+      else skipped++;
     }
+    return { imported, skipped };
   });
 
-  run();
-  return { imported, skipped };
+  return insertMany(txs);
 }
 
 // ---------------------------------------------------------------------------

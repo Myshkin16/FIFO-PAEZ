@@ -32,7 +32,7 @@ app.use('/api/export', require('./routes/export'));
 
 // Global error handler
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
-  console.error(err.message);
+  console.error(err);
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
