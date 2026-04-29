@@ -73,16 +73,17 @@ const navLinkStyle = ({ isActive }) => ({
   display: 'block',
 })
 
-const YEARS = [2025, 2024, 2023, 2022, 2021]
+const currentYear = new Date().getFullYear()
+const YEARS = Array.from({ length: 6 }, (_, i) => currentYear - i)
 
-export const YearContext = React.createContext(new Date().getFullYear())
+export const YearContext = React.createContext({ year: new Date().getFullYear(), setYear: () => {} })
 
 export default function App() {
   const [year, setYear] = useState(new Date().getFullYear())
   const navigate = useNavigate()
 
   return (
-    <YearContext.Provider value={year}>
+    <YearContext.Provider value={{ year, setYear }}>
       <nav style={styles.navbar}>
         <div style={styles.logo}>₿ FIFO IRPF</div>
         <div style={styles.navLinks}>
