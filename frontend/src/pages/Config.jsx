@@ -43,6 +43,7 @@ export default function Config() {
     },
     onError: (err) => {
       setSaveMsg('Error: ' + (err?.response?.data?.error || err.message))
+      setTimeout(() => setSaveMsg(null), 4000)
     },
   })
 
@@ -55,6 +56,7 @@ export default function Config() {
     },
     onError: (err) => {
       setDeleteMsg('Error: ' + (err?.response?.data?.error || err.message))
+      setTimeout(() => setDeleteMsg(null), 4000)
     },
   })
 

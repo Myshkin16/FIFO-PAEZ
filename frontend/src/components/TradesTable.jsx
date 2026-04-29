@@ -4,13 +4,10 @@ import { useNavigate } from 'react-router-dom'
 const MUTED = { color: '#8b949e', fontSize: 12 }
 
 function formatDate(dateStr) {
-  if (!dateStr) return '-'
-  const d = new Date(dateStr)
-  if (isNaN(d)) return dateStr
-  const dd = String(d.getDate()).padStart(2, '0')
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const yyyy = d.getFullYear()
-  return `${dd}/${mm}/${yyyy}`
+  const s = dateStr ? dateStr.slice(0, 10) : ''
+  if (!s) return '—'
+  const [y, m, d] = s.split('-')
+  return `${d}/${m}/${y}`
 }
 
 function ExchangeBadge({ exchange }) {

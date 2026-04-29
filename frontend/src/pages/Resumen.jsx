@@ -34,12 +34,8 @@ export default function Resumen() {
     return <div style={{ color: '#8b949e', padding: '40px 0' }}>Cargando...</div>
   }
 
-  if (fifoQuery.isError) {
-    return (
-      <div style={{ color: '#f85149', padding: '16px', background: '#21262d', borderRadius: 6 }}>
-        Error: {fifoQuery.error?.message || 'No se pudo cargar los datos'}
-      </div>
-    )
+  if (fifoQuery.isError || summaryQuery.isError) {
+    return <div style={{ color: '#f85149' }}>Error al cargar los datos. ¿Está corriendo el backend?</div>
   }
 
   const fifoData = fifoQuery.data || {}

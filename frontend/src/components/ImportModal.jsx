@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import { importKraken, importBinance } from '../api/client'
 
 const CARD = { background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: 16 }
@@ -15,6 +15,8 @@ export default function ImportModal({ onClose, onSuccess }) {
   const [binanceFile, setBinanceFile] = useState(null)
 
   const fileRef = useRef()
+  const timerRef = useRef()
+  useEffect(() => () => clearTimeout(timerRef.current), [])
 
   async function handleKraken() {
     setKrakenLoading(true)
@@ -23,7 +25,7 @@ export default function ImportModal({ onClose, onSuccess }) {
     try {
       const data = await importKraken()
       setKrakenResult(data)
-      setTimeout(() => { onSuccess(); onClose() }, 1000)
+      timerRef.current = setTimeout(() => { onSuccess(); onClose() }, 1000)
     } catch (err) {
       setKrakenError(err?.response?.data?.error || err.message || 'Error al importar')
     } finally {
@@ -39,7 +41,7 @@ export default function ImportModal({ onClose, onSuccess }) {
     try {
       const data = await importBinance(binanceFile)
       setBinanceResult(data)
-      setTimeout(() => { onSuccess(); onClose() }, 1000)
+      timerRef.current = setTimeout(() => { onSuccess(); onClose() }, 1000)
     } catch (err) {
       setBinanceError(err?.response?.data?.error || err.message || 'Error al importar')
     } finally {
