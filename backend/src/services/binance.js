@@ -81,9 +81,16 @@ async function parseBinanceCsv(csvBuffer) {
       }
     }
 
-    const amount   = executedAmount;
-    const totalEur = amount * priceEur;
-    const type     = side === 'BUY' ? 'BUY' : 'SELL';
+    const amount = executedAmount;
+    // If the quote currency is EUR, the Amount column is the exact executed total;
+    // otherwise approximate from the EUR price lookup.
+    let totalEur;
+    if (quote === 'EUR') {
+      totalEur = amountValue; // exact trade total from exchange
+    } else {
+      totalEur = amount * priceEur; // approximation for non-EUR pairs
+    }
+    const type = side === 'BUY' ? 'BUY' : 'SELL';
 
     // Build a stable ID
     const id = `binance_${dateUtc}_${pair}_${side}`.replace(/\s+/g, '_');

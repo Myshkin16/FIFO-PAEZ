@@ -204,8 +204,12 @@ async function fetchKrakenHistory(apiKey, privateKey) {
       }
     }
 
-    const amount   = parseFloat(t.vol)  || 0;
-    const feeEur   = parseFloat(t.fee)  || 0; // Kraken fee is in quote currency; approximate as EUR for EUR pairs
+    const amount  = parseFloat(t.vol) || 0;
+    const rawFee  = parseFloat(t.fee) || 0;
+    // Kraken returns fees in the quote currency. Convert to EUR for non-EUR pairs.
+    const feeEur  = quote === 'EUR'
+      ? rawFee
+      : rawFee * (priceEur / (tradePrice || 1));
     const totalEur = amount * priceEur;
 
     const type = t.type === 'buy' ? 'BUY' : 'SELL';
