@@ -13,7 +13,9 @@ const router = express.Router();
 function encrypt(text) {
   const salt = crypto.randomBytes(16);
   const iv   = crypto.randomBytes(12);
-  const key  = crypto.scryptSync(process.env.ENCRYPTION_SECRET || 'dev-secret-change-me', salt, 32);
+  const secret = process.env.ENCRYPTION_SECRET;
+  if (!secret) throw new Error('ENCRYPTION_SECRET environment variable is not set');
+  const key  = crypto.scryptSync(secret, salt, 32);
   const cipher    = crypto.createCipheriv('aes-256-gcm', key, iv);
   const encrypted = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
   const tag       = cipher.getAuthTag();
@@ -26,7 +28,9 @@ function decrypt(encryptedBase64) {
   const iv        = buf.slice(16, 28);
   const tag       = buf.slice(28, 44);
   const encrypted = buf.slice(44);
-  const key       = crypto.scryptSync(process.env.ENCRYPTION_SECRET || 'dev-secret-change-me', salt, 32);
+  const secret = process.env.ENCRYPTION_SECRET;
+  if (!secret) throw new Error('ENCRYPTION_SECRET environment variable is not set');
+  const key       = crypto.scryptSync(secret, salt, 32);
   const decipher  = crypto.createDecipheriv('aes-256-gcm', key, iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
@@ -38,8 +42,9 @@ function decrypt(encryptedBase64) {
 
 router.get('/kraken-keys', (req, res, next) => {
   try {
-    const row = db.prepare("SELECT key FROM config WHERE key = 'kraken_api_key'").get();
-    res.json({ configured: !!row });
+    const k1 = db.prepare("SELECT 1 FROM config WHERE key = 'kraken_api_key'").get();
+    const k2 = db.prepare("SELECT 1 FROM config WHERE key = 'kraken_private_key'").get();
+    res.json({ configured: !!(k1 && k2) });
   } catch (err) {
     next(err);
   }

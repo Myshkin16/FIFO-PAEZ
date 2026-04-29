@@ -9,13 +9,23 @@ const { parseBinanceCsv }   = require('../services/binance');
 const { decrypt }           = require('./config');
 
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === 'text/csv' || file.originalname.endsWith('.csv')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only CSV files are accepted'));
+    }
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Shared DB helpers
 // ---------------------------------------------------------------------------
 
-const stmtInsert = db.prepare(`INSERT OR IGNORE INTO transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`);
+const stmtInsert = db.prepare(`INSERT OR IGNORE INTO transactions (id, source, type, crypto, amount, price_eur, total_eur, fee_eur, date, raw_pair) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
 /**
  * Inserts an array of transaction objects, returning {imported, skipped}.
