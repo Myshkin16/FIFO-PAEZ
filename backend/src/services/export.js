@@ -13,6 +13,8 @@ const { stringify } = require('csv-stringify/sync');
  * @returns {string}  CSV string (UTF-8 with BOM for Excel compatibility)
  */
 function generateIrpfCsv(fifoResults) {
+  if (!Array.isArray(fifoResults)) throw new TypeError('generateIrpfCsv expects an array of FIFO results');
+
   const header = [
     'Fecha venta',
     'Crypto',

@@ -17,11 +17,12 @@ const { getPriceEur } = require('./prices');
  * @returns {Promise<object[]>}
  */
 async function parseBinanceCsv(csvBuffer) {
-  const rows = parse(csvBuffer, {
-    columns:          true,
-    skip_empty_lines: true,
-    trim:             true,
-  });
+  let rows;
+  try {
+    rows = parse(csvBuffer, { columns: true, skip_empty_lines: true, trim: true });
+  } catch (err) {
+    throw new Error(`Failed to parse Binance CSV: ${err.message}. Make sure you exported "Trade History" from Binance.`);
+  }
 
   const results = [];
 
@@ -92,8 +93,8 @@ async function parseBinanceCsv(csvBuffer) {
     }
     const type = side === 'BUY' ? 'BUY' : 'SELL';
 
-    // Build a stable ID
-    const id = `binance_${dateUtc}_${pair}_${side}`.replace(/\s+/g, '_');
+    // Build a unique ID (append row index to handle duplicate date/pair/side)
+    const id = `binance_${dateUtc}_${pair}_${side}_${results.length}`.replace(/\s+/g, '_');
 
     results.push({
       id,

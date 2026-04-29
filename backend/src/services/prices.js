@@ -28,6 +28,10 @@ const COIN_ID_MAP = {
  * @returns {Promise<number>}
  */
 async function getPriceEur(crypto, dateStr) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    throw new Error(`Invalid dateStr format: "${dateStr}". Expected YYYY-MM-DD.`);
+  }
+
   const symbol = crypto.toUpperCase();
 
   // 1. Check cache

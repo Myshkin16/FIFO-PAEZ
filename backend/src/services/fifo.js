@@ -101,6 +101,10 @@ function calculateFifo(transactions) {
         }
       }
 
+      const warning = remainingToSell > 1e-10
+        ? `Insufficient buy inventory: ${remainingToSell.toFixed(8)} ${crypto} unmatched — cost basis may be understated`
+        : undefined;
+
       const saleProceeds = sell.total_eur;
       const fees         = sell.fee_eur || 0;
       const gainLoss     = saleProceeds - costBasis - fees;
@@ -113,9 +117,10 @@ function calculateFifo(transactions) {
         saleProceeds: round(saleProceeds),
         fees:         round(fees),
         gainLoss:     round(gainLoss),
-        year:         new Date(sell.date).getFullYear(),
+        year:         parseInt(sell.date.slice(0, 4), 10),
         source:       sell.source,
         buyLots,
+        warning,
       });
     }
   }

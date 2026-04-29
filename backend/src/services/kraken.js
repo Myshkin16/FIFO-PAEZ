@@ -2,7 +2,6 @@
 
 const crypto = require('crypto');
 const https  = require('https');
-const qs     = require('querystring');
 
 const { getPriceEur } = require('./prices');
 
@@ -104,7 +103,7 @@ function krakenSign(path, postBody, nonce, privateKey) {
  */
 async function krakenPost(path, params, apiKey, privateKey) {
   const nonce    = String(Date.now() * 1000);
-  const body     = qs.stringify({ nonce, ...params });
+  const body     = new URLSearchParams({ nonce, ...params }).toString();
   const apiSign  = krakenSign(path, body, nonce, privateKey);
 
   const data = await httpsPostJson(`${KRAKEN_BASE}${path}`, body, {
@@ -136,8 +135,12 @@ async function fetchAllTrades(apiKey, privateKey) {
   const allTrades = {};
   let offset = 0;
   const PAGE = 50;
+  let page = 0;
+  const MAX_PAGES = 200;
 
   while (true) {
+    if (++page > MAX_PAGES) throw new Error('Kraken pagination safety limit reached');
+
     const result = await krakenPost(
       '/0/private/TradesHistory',
       { ofs: offset },
@@ -169,6 +172,10 @@ async function fetchAllTrades(apiKey, privateKey) {
  * @returns {Promise<object[]>}  Array of normalised transaction objects
  */
 async function fetchKrakenHistory(apiKey, privateKey) {
+  if (!apiKey || !privateKey) throw new Error('Kraken API credentials are required');
+  const keyBuf = Buffer.from(privateKey, 'base64');
+  if (keyBuf.length < 32) throw new Error('Kraken private key appears invalid (expected base64, min 32 bytes)');
+
   const rawTrades = await fetchAllTrades(apiKey, privateKey);
   const results   = [];
 
@@ -265,6 +272,7 @@ function httpsPostJson(url, body, headers) {
     });
 
     req.on('error', reject);
+    req.setTimeout(10000, () => { req.destroy(new Error('Kraken API request timed out')); });
     req.write(body);
     req.end();
   });
