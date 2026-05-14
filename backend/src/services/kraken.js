@@ -226,9 +226,13 @@ async function fetchKrakenHistory(apiKey, privateKey) {
       try {
         priceEur = await getPriceEur(base, dateStr);
       } catch {
-        // Fallback: convert USD → EUR with spot EUR/USD price
-        const usdPerEur = await getPriceEur('USD', dateStr).catch(() => null);
-        if (usdPerEur) {
+        // Fallback: convert USD → EUR with spot EUR/USD price.
+        // Guard against usdPerEur being 0/null (USDEUR pair doesn't exist on
+        // Binance, USDUSDT doesn't either, so this can return 0). Without
+        // the guard, tradePrice/0 = Infinity → SQLite stores NULL → INSERT
+        // explodes on the NOT NULL price_eur constraint.
+        const usdPerEur = await getPriceEur('USD', dateStr).catch(() => 0);
+        if (usdPerEur > 0) {
           priceEur = tradePrice / usdPerEur;
         } else {
           priceEur = tradePrice; // last resort, may be inaccurate
