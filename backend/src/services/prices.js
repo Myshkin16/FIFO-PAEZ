@@ -63,12 +63,16 @@ async function getPriceEur(crypto, dateStr) {
   // EUR has a fixed self-price of 1.
   if (symbol === 'EUR') return 1;
 
-  // 1. Check cache
+  // 1. Check cache. Entries with source='failed' (and price 0) are treated as
+  // cache misses so a subsequent import can retry — otherwise a transient
+  // Binance/network blip during the first lookup would permanently zero-out
+  // every trade that references this symbol/date. Legacy rows (source NULL)
+  // pre-date the migration and are trusted as-is.
   const cached = db
-    .prepare('SELECT price_eur FROM price_cache WHERE crypto = ? AND date = ?')
+    .prepare('SELECT price_eur, source FROM price_cache WHERE crypto = ? AND date = ?')
     .get(symbol, dateStr);
 
-  if (cached) {
+  if (cached && cached.source !== 'failed') {
     return cached.price_eur;
   }
 
