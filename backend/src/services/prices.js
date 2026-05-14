@@ -4,36 +4,40 @@ const https = require('https');
 const db    = require('../db/db');
 
 // ---------------------------------------------------------------------------
-// CoinGecko coin ID mapping
+// Price source: Binance public klines API
 // ---------------------------------------------------------------------------
-const COIN_ID_MAP = {
-  BTC:   'bitcoin',
-  ETH:   'ethereum',
-  SOL:   'solana',
-  XRP:   'ripple',
-  USDT:  'tether',
-  BNB:   'binancecoin',
-  ADA:   'cardano',
-  DOT:   'polkadot',
-  MATIC: 'matic-network',
-  LINK:  'chainlink',
-  FDUSD: 'first-digital-usd',
-  SHIB:  'shiba-inu',
-  // REI, CTK and others intentionally omitted — return 0 rather than guess.
-};
+// Why Binance instead of CoinGecko? In late 2024 CoinGecko gated /coins/{id}/history
+// behind their Demo plan (requires an API key); the free anonymous tier now
+// returns HTTP 429/401 immediately, making large historical imports impossible.
+// Binance's /api/v3/klines endpoint is public, key-free, and allows ~1200
+// requests/minute — orders of magnitude more headroom than we need.
+//
+// Strategy per symbol:
+//   1. Try {SYMBOL}EUR directly (BTCEUR, ETHEUR, ADAEUR, etc.)
+//   2. If that pair doesn't exist on Binance, try {SYMBOL}USDT and multiply
+//      by the USDT→EUR rate for the same date.
+//   3. For USDT itself: invert the EURUSDT close price (1 USDT = 1/EURUSDT EUR)
+//   4. For symbols with no Binance market: return 0 (caller logs).
+//
+// Stablecoins like USDC are valued at their actual market rate (USDCUSDT × USDT/EUR),
+// not assumed-1.0, so depegs surface correctly in the FIFO output.
 
 // ---------------------------------------------------------------------------
-// Pre-emptive throttling (CoinGecko free tier ≈ 10–30 calls/min)
+// Throttling
 // ---------------------------------------------------------------------------
-let lastCallAt = 0;
-const MIN_DELAY_MS = 1500;
+// Binance allows ~1200 req/min IP-wide. A 200ms gap (= 300/min) is generous
+// and leaves plenty of room for the recursive USDT lookups some symbols need.
+// Chain-based queue so concurrent imports share one ordered slot.
+let tail = Promise.resolve();
+const MIN_DELAY_MS = 200;
 
-async function throttle() {
-  const elapsed = Date.now() - lastCallAt;
-  if (elapsed < MIN_DELAY_MS) {
-    await sleep(MIN_DELAY_MS - elapsed);
-  }
-  lastCallAt = Date.now();
+function throttle() {
+  const prev = tail;
+  tail = (async () => {
+    await prev;
+    await sleep(MIN_DELAY_MS);
+  })();
+  return prev;
 }
 
 // ---------------------------------------------------------------------------
@@ -43,7 +47,7 @@ const inflight = new Map();
 
 /**
  * Returns the EUR price for `crypto` on `dateStr` (YYYY-MM-DD).
- * Checks the SQLite price_cache first; falls back to CoinGecko API.
+ * Checks the SQLite price_cache first; falls back to Binance klines.
  *
  * @param {string} crypto   - Ticker symbol, e.g. 'BTC'
  * @param {string} dateStr  - 'YYYY-MM-DD'
@@ -56,13 +60,15 @@ async function getPriceEur(crypto, dateStr) {
 
   const symbol = crypto.toUpperCase();
 
+  // EUR has a fixed self-price of 1.
+  if (symbol === 'EUR') return 1;
+
   // 1. Check cache
   const cached = db
     .prepare('SELECT price_eur FROM price_cache WHERE crypto = ? AND date = ?')
     .get(symbol, dateStr);
 
   if (cached) {
-    console.log(`[prices] ${symbol} ${dateStr} -> cache hit (€${cached.price_eur})`);
     return cached.price_eur;
   }
 
@@ -73,21 +79,35 @@ async function getPriceEur(crypto, dateStr) {
   }
 
   const promise = (async () => {
-    console.log(`[prices] ${symbol} ${dateStr} -> fetching from CoinGecko...`);
-    await throttle();
-    const price = await fetchFromCoinGecko(symbol, dateStr);
+    let price = 0;
+    let source = 'failed';
+    try {
+      const result = await fetchFromBinance(symbol, dateStr);
+      price = result.price;
+      source = result.source;
+    } catch (err) {
+      // Network / parse / unexpected error: cache 0 so we don't refetch this
+      // symbol+date during the rest of the import.
+      console.warn(
+        `[prices] ${symbol} ${dateStr} fetch failed: ${err.message} — caching 0 EUR`
+      );
+      price = 0;
+      source = 'failed';
+    }
 
-    db.prepare('INSERT OR REPLACE INTO price_cache (crypto, date, price_eur) VALUES (?, ?, ?)')
-      .run(symbol, dateStr, price);
+    db.prepare(
+      `INSERT OR REPLACE INTO price_cache (crypto, date, price_eur, source, fetched_at)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`
+    ).run(symbol, dateStr, price, source);
 
-    console.log(`[prices] ${symbol} ${dateStr} -> fetched €${price}`);
+    console.log(`[prices] ${symbol} ${dateStr} -> €${price} (${source})`);
     return price;
-  })().catch(err => {
-    inflight.delete(key);
-    throw err;
-  }).then(value => {
+  })().then(value => {
     inflight.delete(key);
     return value;
+  }, err => {
+    inflight.delete(key);
+    throw err;
   });
 
   inflight.set(key, promise);
@@ -95,69 +115,80 @@ async function getPriceEur(crypto, dateStr) {
 }
 
 /**
- * Fetches the EUR price from CoinGecko with up to 2 retries on 429
- * (10s, then 30s exponential backoff). Returns 0 for unknown coins
- * or coins CoinGecko returns no EUR price for. Throws on network/5xx errors.
+ * Resolves the EUR price for `symbol` on `dateStr` using Binance daily klines.
+ *
+ * Returns `{price, source}` where source is one of:
+ *   - 'binance-direct'        — direct {SYMBOL}EUR pair on Binance.
+ *   - 'binance-usdt-derived'  — {SYMBOL}USDT × USDT/EUR, or 1/EURUSDT for USDT.
+ *   - 'failed'                — no market and no derivable price (price = 0).
  */
-async function fetchFromCoinGecko(symbol, dateStr, attempt = 1) {
-  // If we have no mapping, do not guess — gracefully return 0.
-  if (!COIN_ID_MAP[symbol]) {
-    console.warn(
-      `[prices] No price found for ${symbol} on ${dateStr}, returning 0 EUR (manual review required)`
-    );
-    return 0;
+async function fetchFromBinance(symbol, dateStr) {
+  const startMs = Date.parse(`${dateStr}T00:00:00Z`);
+  if (Number.isNaN(startMs)) {
+    throw new Error(`Cannot parse date '${dateStr}'`);
+  }
+  const endMs = startMs + 86_399_999;
+
+  // 1. Direct EUR pair (BTCEUR, ETHEUR, ADAEUR, ...)
+  const direct = await fetchKlineClose(`${symbol}EUR`, startMs, endMs);
+  if (direct !== null) return { price: direct, source: 'binance-direct' };
+
+  // 2. USDT itself: invert the EUR/USDT rate.
+  if (symbol === 'USDT') {
+    const eurUsdt = await fetchKlineClose('EURUSDT', startMs, endMs);
+    if (eurUsdt && eurUsdt > 0) {
+      return { price: 1 / eurUsdt, source: 'binance-usdt-derived' };
+    }
+    console.warn(`[prices] No EURUSDT kline for ${dateStr}, returning 0 EUR`);
+    return { price: 0, source: 'failed' };
   }
 
-  const coinId    = COIN_ID_MAP[symbol];
-  const geckoDate = toGeckoDate(dateStr); // DD-MM-YYYY
+  // 3. {SYMBOL}USDT × (USDT in EUR). USDT lookup uses getPriceEur so it's cached
+  // and serialized through the same throttle/inflight machinery as everything else.
+  const symbolUsdt = await fetchKlineClose(`${symbol}USDT`, startMs, endMs);
+  if (symbolUsdt !== null) {
+    const usdtEur = await getPriceEur('USDT', dateStr);
+    if (usdtEur > 0) {
+      return { price: symbolUsdt * usdtEur, source: 'binance-usdt-derived' };
+    }
+  }
+
+  console.warn(
+    `[prices] No Binance market found for ${symbol} on ${dateStr}, returning 0 EUR (manual review required)`
+  );
+  return { price: 0, source: 'failed' };
+}
+
+/**
+ * Fetches one daily kline from Binance and returns its close price.
+ * Returns null when the symbol pair is invalid (HTTP 400 -1121) or the
+ * kline array is empty (no data for that date).
+ */
+async function fetchKlineClose(pair, startMs, endMs) {
+  await throttle();
 
   const url =
-    `https://api.coingecko.com/api/v3/coins/${coinId}/history` +
-    `?date=${geckoDate}&localization=false`;
+    `https://api.binance.com/api/v3/klines` +
+    `?symbol=${pair}&interval=1d&startTime=${startMs}&endTime=${endMs}&limit=1`;
 
-  let result;
-  try {
-    result = await httpsGetJson(url);
-  } catch (err) {
-    // Network or unrecoverable HTTP error — propagate so user sees it.
-    throw new Error(
-      `CoinGecko request failed for ${symbol} on ${dateStr}: ${err.message}`
-    );
+  const result = await httpsGetJson(url);
+
+  // 400 + -1121 means "Invalid symbol" — the pair doesn't exist on Binance.
+  if (result.__status === 400) {
+    return null;
+  }
+  // 418/429 → IP-banned or rate-limited. Surface as error so caller can decide.
+  if (result.__status !== 200) {
+    throw new Error(`HTTP ${result.__status} from Binance for ${pair}`);
   }
 
-  // 404 → coin/date unknown to CoinGecko: degrade gracefully.
-  if (result && result.__status === 404) {
-    console.warn(
-      `[prices] No price found for ${symbol} on ${dateStr}, returning 0 EUR (manual review required)`
-    );
-    return 0;
-  }
+  const body = result.body;
+  if (!Array.isArray(body) || body.length === 0) return null;
 
-  // 429 → rate limited: retry with exponential backoff (10s, 30s).
-  if (result && result.__status === 429) {
-    const delays = [10_000, 30_000];
-    if (attempt <= delays.length) {
-      const delay = delays[attempt - 1];
-      console.log(`[prices] 429 rate limit hit, waiting ${delay}ms before retry...`);
-      await sleep(delay);
-      return fetchFromCoinGecko(symbol, dateStr, attempt + 1);
-    }
-    throw new Error(
-      `CoinGecko rate limit exceeded for ${symbol} on ${dateStr} after ${delays.length} retries.`
-    );
-  }
-
-  const data  = result.body;
-  const price = data?.market_data?.current_price?.eur;
-
-  if (typeof price !== 'number' || isNaN(price)) {
-    console.warn(
-      `[prices] No price found for ${symbol} on ${dateStr}, returning 0 EUR (manual review required)`
-    );
-    return 0;
-  }
-
-  return price;
+  // Kline shape: [openTime, open, high, low, close, volume, ...]
+  const close = parseFloat(body[0][4]);
+  if (!Number.isFinite(close) || close <= 0) return null;
+  return close;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,23 +196,10 @@ async function fetchFromCoinGecko(symbol, dateStr, attempt = 1) {
 // ---------------------------------------------------------------------------
 
 /**
- * Converts 'YYYY-MM-DD' to 'DD-MM-YYYY' (CoinGecko's expected format).
- */
-function toGeckoDate(dateStr) {
-  const [y, m, d] = dateStr.split('-');
-  return `${d}-${m}-${y}`;
-}
-
-/**
  * Performs an HTTPS GET and returns `{ __status, body }`.
- * - On 200: `{ __status: 200, body: <parsed JSON> }`
- * - On 404 / 429: `{ __status, body: null }` (caller decides what to do)
- * - On other non-2xx, network error, timeout, or JSON parse error: rejects.
- *
- * Includes a 10s socket timeout so we never hang indefinitely.
- *
- * @param {string} url
- * @returns {Promise<{__status: number, body: any}>}
+ * - On 2xx: `{ __status, body: <parsed JSON> }`
+ * - On 4xx: `{ __status, body: <parsed JSON or null> }` (caller decides)
+ * - On 5xx, network error, timeout, or JSON parse error: rejects.
  */
 function httpsGetJson(url) {
   return new Promise((resolve, reject) => {
@@ -192,29 +210,30 @@ function httpsGetJson(url) {
         let raw = '';
         res.on('data', chunk => { raw += chunk; });
         res.on('end', () => {
-          if (res.statusCode === 429) {
-            resolve({ __status: 429, body: null });
+          const status = res.statusCode;
+          if (status >= 500) {
+            reject(new Error(`HTTP ${status}`));
             return;
           }
-          if (res.statusCode === 404) {
-            resolve({ __status: 404, body: null });
-            return;
+          let body = null;
+          if (raw.length > 0) {
+            try {
+              body = JSON.parse(raw);
+            } catch (e) {
+              if (status >= 200 && status < 300) {
+                reject(new Error(`JSON parse error: ${e.message}`));
+                return;
+              }
+              // Non-JSON 4xx body: ignore, caller only needs status.
+            }
           }
-          if (res.statusCode !== 200) {
-            reject(new Error(`HTTP ${res.statusCode} from CoinGecko`));
-            return;
-          }
-          try {
-            resolve({ __status: 200, body: JSON.parse(raw) });
-          } catch (e) {
-            reject(new Error(`JSON parse error: ${e.message}`));
-          }
+          resolve({ __status: status, body });
         });
       }
     );
 
     req.setTimeout(10_000, () => {
-      req.destroy(new Error('CoinGecko request timed out after 10s'));
+      req.destroy(new Error('Request timed out after 10s'));
     });
 
     req.on('error', reject);
@@ -225,4 +244,47 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-module.exports = { getPriceEur };
+/**
+ * Pre-fetches a deduplicated batch of (symbol, dateStr) prices into the cache.
+ * Skips entries already present. Logs progress so the user can see the import
+ * is making forward progress instead of appearing stuck.
+ *
+ * @param {Array<{symbol: string, dateStr: string}>} items
+ * @returns {Promise<{total: number, alreadyCached: number, fetched: number}>}
+ */
+async function warmPriceCache(items) {
+  const unique = new Map();
+  for (const it of items) {
+    if (!it || !it.symbol || !it.dateStr) continue;
+    const symbol  = it.symbol.toUpperCase();
+    const dateStr = it.dateStr;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue;
+    if (symbol === 'EUR') continue;
+    unique.set(`${symbol}_${dateStr}`, { symbol, dateStr });
+  }
+
+  const stmtCheck = db.prepare('SELECT 1 FROM price_cache WHERE crypto = ? AND date = ?');
+  const needed = [];
+  for (const it of unique.values()) {
+    if (!stmtCheck.get(it.symbol, it.dateStr)) needed.push(it);
+  }
+
+  const total = unique.size;
+  const alreadyCached = total - needed.length;
+  console.log(
+    `[prices] Warming cache: ${needed.length} to fetch (${alreadyCached} already cached, ${total} total unique)`
+  );
+
+  let done = 0;
+  for (const { symbol, dateStr } of needed) {
+    done++;
+    if (done % 10 === 0 || done === needed.length) {
+      console.log(`[prices] [${done}/${needed.length}] (latest: ${symbol} ${dateStr})`);
+    }
+    await getPriceEur(symbol, dateStr);
+  }
+
+  return { total, alreadyCached, fetched: needed.length };
+}
+
+module.exports = { getPriceEur, warmPriceCache };

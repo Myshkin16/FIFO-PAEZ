@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getKrakenConfig, saveKrakenKeys, deleteKrakenKeys } from '../api/client'
+import { getKrakenConfig, saveKrakenKeys, deleteKrakenKeys, repricePrices } from '../api/client'
 import ImportModal from '../components/ImportModal'
 
 const CARD = { background: '#161b22', border: '1px solid #30363d', borderRadius: 6, padding: 16 }
@@ -25,6 +25,7 @@ export default function Config() {
   const [privateKey, setPrivateKey] = useState('')
   const [saveMsg, setSaveMsg] = useState(null)
   const [deleteMsg, setDeleteMsg] = useState(null)
+  const [repriceMsg, setRepriceMsg] = useState(null)
   const [showImport, setShowImport] = useState(false)
 
   const { data: config, isLoading } = useQuery({
@@ -59,6 +60,35 @@ export default function Config() {
       setTimeout(() => setDeleteMsg(null), 4000)
     },
   })
+
+  const repriceMutation = useMutation({
+    mutationFn: repricePrices,
+    onSuccess: (data) => {
+      const parts = [
+        `${data.updated} actualizadas`,
+        `${data.unchanged} sin cambios`,
+        data.skippedNoPrice > 0 ? `${data.skippedNoPrice} sin precio en cache` : null,
+      ].filter(Boolean)
+      setRepriceMsg(parts.join(' · '))
+      queryClient.invalidateQueries({ queryKey: ['fifo'] })
+      queryClient.invalidateQueries({ queryKey: ['fifo-summary'] })
+      setTimeout(() => setRepriceMsg(null), 8000)
+    },
+    onError: (err) => {
+      setRepriceMsg('Error: ' + (err?.response?.data?.error || err.message))
+      setTimeout(() => setRepriceMsg(null), 6000)
+    },
+  })
+
+  function handleReprice() {
+    if (window.confirm(
+      'Recalcular price_eur y total_eur de TODAS las transacciones usando ' +
+      'el cache de precios actual.\n\nLas filas sin precio en cache (o cuyo ' +
+      'fetch falló) se dejan intactas.\n\n¿Continuar?'
+    )) {
+      repriceMutation.mutate()
+    }
+  }
 
   const isConfigured = config?.configured === true
 
@@ -181,7 +211,7 @@ export default function Config() {
       </div>
 
       {/* Binance section */}
-      <div style={CARD}>
+      <div style={{ ...CARD, marginBottom: 16 }}>
         <div style={{ color: '#e6edf3', fontSize: 14, fontWeight: 700, marginBottom: 10 }}>Binance (CSV)</div>
         <p style={MUTED}>
           Para importar operaciones de Binance, descarga el historial de transacciones desde tu cuenta Binance
@@ -191,6 +221,40 @@ export default function Config() {
         <p style={{ ...MUTED, marginBottom: 0 }}>
           Binance no requiere configuración de API Key — únicamente el archivo de exportación CSV.
         </p>
+      </div>
+
+      {/* Maintenance section */}
+      <div style={CARD}>
+        <div style={{ color: '#e6edf3', fontSize: 14, fontWeight: 700, marginBottom: 10 }}>Mantenimiento</div>
+        <p style={MUTED}>
+          Si una importación se ejecutó con precios incorrectos (p. ej., el endpoint de precios devolvió 0 EUR
+          por un fallo temporal), pulsa <strong style={{ color: '#e6edf3' }}>Recalcular precios</strong> para
+          arreglar los importes en EUR de todas las operaciones existentes usando el cache actual de precios.
+          Es idempotente: las filas correctas se quedan intactas.
+        </p>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            onClick={handleReprice}
+            disabled={repriceMutation.isPending}
+            style={{
+              background: repriceMutation.isPending ? '#21262d' : '#2d1e00',
+              color: repriceMutation.isPending ? '#8b949e' : '#f0883e',
+              border: '1px solid #f0883e44',
+              borderRadius: 6,
+              padding: '7px 18px',
+              fontSize: 13,
+              fontWeight: 700,
+              cursor: repriceMutation.isPending ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {repriceMutation.isPending ? 'Recalculando...' : 'Recalcular precios'}
+          </button>
+          {repriceMsg && (
+            <div style={{ color: repriceMsg.startsWith('Error') ? '#f85149' : '#3fb950', fontSize: 12 }}>
+              {repriceMsg}
+            </div>
+          )}
+        </div>
       </div>
 
       {showImport && (

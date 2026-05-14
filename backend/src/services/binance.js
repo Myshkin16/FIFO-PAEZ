@@ -1,7 +1,7 @@
 'use strict';
 
 const { parse } = require('csv-parse/sync');
-const { getPriceEur } = require('./prices');
+const { getPriceEur, warmPriceCache } = require('./prices');
 
 // Stablecoins treated as fiat-equivalent quote currencies for price lookups
 const USD_STABLES = new Set(['USDT', 'USDC', 'BUSD', 'TUSD', 'FDUSD', 'DAI']);
@@ -22,6 +22,9 @@ const FIAT_CURRENCIES = new Set(['EUR', 'USD', 'GBP', 'CHF']);
  *
  * @param {Buffer|string} csvBuffer
  * @returns {Promise<object[]>}
+ */
+/**
+ * @returns {Promise<{transactions: object[], skipped: Array<{reason: string, detail: string}>}>}
  */
 async function parseBinanceCsv(csvBuffer) {
   // Strip BOM if present, then sniff the header row
@@ -55,6 +58,27 @@ async function parseTradeHistory(text) {
     );
   }
 
+  const skipped = [];
+
+  // First pass: collect every (currency, date) we'll need a price for, so we
+  // can warm the cache in one pre-throttled batch instead of fetching one
+  // price per trade serially (which under CoinGecko's 10/min free tier and
+  // an N-trade CSV would never finish).
+  const pricesNeeded = [];
+  for (const row of rows) {
+    const r = normaliseKeys(row);
+    const dateUtc = r['date(utc)'] || r['date'];
+    const pair    = r['pair'] || '';
+    if (!dateUtc || !pair) continue;
+    const dateStr = dateUtc.slice(0, 10);
+    const { base, quote } = splitPair(pair);
+    pricesNeeded.push({ symbol: base, dateStr });
+    pricesNeeded.push({ symbol: quote, dateStr });
+    const { currency: feeCurrency } = parseValueWithCurrency(r['fee'] || '');
+    if (feeCurrency) pricesNeeded.push({ symbol: feeCurrency, dateStr });
+  }
+  await warmPriceCache(pricesNeeded);
+
   const results = [];
 
   for (const row of rows) {
@@ -68,7 +92,13 @@ async function parseTradeHistory(text) {
     const feeRaw    = r['fee']       || '';   // e.g. "9.75 EUR"
     const priceRaw  = r['price']     || '';   // e.g. "65000"
 
-    if (!dateUtc || !pair || !side) continue;
+    if (!dateUtc || !pair || !side) {
+      skipped.push({
+        reason: 'missing-fields',
+        detail: `Row missing date/pair/side: ${JSON.stringify(r).slice(0, 200)}`,
+      });
+      continue;
+    }
 
     const { base, quote } = splitPair(pair);
 
@@ -130,7 +160,7 @@ async function parseTradeHistory(text) {
     });
   }
 
-  return results;
+  return { transactions: results, skipped };
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +184,8 @@ async function parseTransactionHistory(text) {
     );
   }
 
+  const skipped = [];
+
   // Normalise rows
   const norm = [];
   for (const row of rows) {
@@ -165,12 +197,31 @@ async function parseTransactionHistory(text) {
     const cambio  = parseFloat(r['cambio']) || 0;
     const obs     = r['observación'] || r['observacion'] || '';
 
-    if (!tiempo || !operacion) continue;
-    if (cuenta !== 'Spot') continue;            // skip futures rows
-    if (IGNORED_OPS.has(operacion)) continue;   // skip transfers / deposits / withdrawals
+    if (!tiempo || !operacion) {
+      // Likely an empty footer row or header artefact — drop silently.
+      continue;
+    }
+    if (cuenta !== 'Spot') {
+      // Futures and savings rows are intentionally out of scope for FIFO.
+      continue;
+    }
+    if (IGNORED_OPS.has(operacion)) {
+      // Deposits/withdrawals/transfers don't trigger a capital gain — silent skip.
+      continue;
+    }
 
     norm.push({ tiempo, operacion, moneda, cambio, obs });
   }
+
+  // Pre-warm: collect every (moneda, date) pair the trade builder might need.
+  // Without this, buildTrade would fire one CoinGecko call per fee/quote per
+  // trade. Under the free tier's 10/min limit a multi-hundred-trade CSV never
+  // finishes; with pre-warming we hit each unique key exactly once.
+  const pricesNeeded = norm.map(r => ({
+    symbol:  r.moneda,
+    dateStr: `20${r.tiempo.slice(0, 8)}`,
+  }));
+  await warmPriceCache(pricesNeeded);
 
   // Group by timestamp
   const byTime = new Map();
@@ -209,6 +260,7 @@ async function parseTransactionHistory(text) {
         feeRows:     fees,
         tiempo,
         startIdSuffix: results.length,
+        skipped,
       });
       results.push(...buyTxs);
     }
@@ -222,6 +274,7 @@ async function parseTransactionHistory(text) {
         feeRows:     fees,
         tiempo,
         startIdSuffix: results.length,
+        skipped,
       });
       results.push(...sellTxs);
     }
@@ -248,7 +301,13 @@ async function parseTransactionHistory(text) {
       for (const [, pair] of byObs) {
         const negRow = pair.find(p => p.cambio < 0);
         const posRow = pair.find(p => p.cambio > 0 && p.moneda === 'BNB');
-        if (!negRow) continue;
+        if (!negRow) {
+          skipped.push({
+            reason: 'dust-no-source',
+            detail: `Dust group at ${tiempo} has no negative-side row: ${JSON.stringify(pair).slice(0, 200)}`,
+          });
+          continue;
+        }
 
         const base = negRow.moneda;
         const baseAmount = -negRow.cambio;
@@ -291,7 +350,13 @@ async function parseTransactionHistory(text) {
         }
       }
     }
-    if (mateIdx === -1) continue; // unmatched, skip
+    if (mateIdx === -1) {
+      skipped.push({
+        reason: 'convert-orphan',
+        detail: `Binance Convert row at ${first.tiempo} (${first.moneda} ${first.cambio}) has no mate within 5s`,
+      });
+      continue;
+    }
     const mate = pendingConvert.splice(mateIdx, 1)[0];
 
     const negRow = first.cambio < 0 ? first : mate;
@@ -335,7 +400,7 @@ async function parseTransactionHistory(text) {
     }
   }
 
-  return results;
+  return { transactions: results, skipped };
 }
 
 /**
@@ -357,7 +422,7 @@ async function parseTransactionHistory(text) {
  * @returns {Promise<object[]>}
  */
 async function pairTradeRows(args) {
-  const { type, baseRows, counterRows, feeRows, tiempo, startIdSuffix } = args;
+  const { type, baseRows, counterRows, feeRows, tiempo, startIdSuffix, skipped } = args;
   const baseSet = new Set(baseRows.map(r => r.moneda));
 
   // Counter side: SELL of base => BUY of counter; BUY of base => SELL of counter
@@ -444,6 +509,15 @@ async function pairTradeRows(args) {
   // Group base rows by crypto, preserving CSV order. Pair each base row with
   // the corresponding counter row at the same position.
   const n = Math.min(baseRows.length, counterRows.length);
+  if (baseRows.length !== counterRows.length && skipped) {
+    skipped.push({
+      reason: 'multi-base-mismatch',
+      detail:
+        `At ${tiempo}: ${baseRows.length} base rows vs ${counterRows.length} counter rows; ` +
+        `extra ${Math.abs(baseRows.length - counterRows.length)} unpaired ` +
+        `(${type === 'BUY' ? 'Buy/Spend' : 'Sold/Revenue'}) row(s) dropped.`,
+    });
+  }
 
   // Per-base aggregation across the i-th pairs
   const perBase = new Map(); // base -> { baseAmount, quoteMoneda, quoteAmount }

@@ -3,9 +3,41 @@
 const crypto = require('crypto');
 const https  = require('https');
 
+const db = require('../db/db');
 const { getPriceEur } = require('./prices');
 
 const KRAKEN_BASE = 'https://api.kraken.com';
+
+// ---------------------------------------------------------------------------
+// Monotonic nonce
+// ---------------------------------------------------------------------------
+// Kraken requires nonces to be strictly increasing per API key. Date.now()*1000
+// is unreliable when two requests fire in the same millisecond (the throttle
+// chain in prices.js used to do exactly that, breaking the HMAC signature).
+//
+// We persist the last nonce in the `config` table and bump it atomically with
+// max(now*1000, lastNonce+1) so:
+//   * the value never goes backwards even if the clock drifts;
+//   * two requests can't share a nonce even when issued within the same ms.
+//
+// Trade-off: a DB hit per request, but Kraken's rate limit is ~1 req/s on
+// private endpoints anyway, so this is negligible.
+
+const NONCE_KEY = 'kraken_last_nonce';
+
+function nextNonce() {
+  const select = db.prepare("SELECT value FROM config WHERE key = ?");
+  const upsert = db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)");
+
+  return db.transaction(() => {
+    const row = select.get(NONCE_KEY);
+    const lastNonce = row ? BigInt(row.value) : 0n;
+    const candidate = BigInt(Date.now()) * 1000n;
+    const next = candidate > lastNonce ? candidate : lastNonce + 1n;
+    upsert.run(NONCE_KEY, next.toString());
+    return next.toString();
+  })();
+}
 
 // ---------------------------------------------------------------------------
 // Kraken pair → base crypto normalisation
@@ -102,7 +134,7 @@ function krakenSign(path, postBody, nonce, privateKey) {
  * @returns {Promise<any>}  - Parsed JSON result field
  */
 async function krakenPost(path, params, apiKey, privateKey) {
-  const nonce    = String(Date.now() * 1000);
+  const nonce    = nextNonce();
   const body     = new URLSearchParams({ nonce, ...params }).toString();
   const apiSign  = krakenSign(path, body, nonce, privateKey);
 

@@ -32,13 +32,13 @@ const stmtInsert = db.prepare(`INSERT OR IGNORE INTO transactions (id, source, t
  */
 function bulkInsert(txs) {
   const insertMany = db.transaction((txs) => {
-    let imported = 0, skipped = 0;
+    let imported = 0, duplicates = 0;
     for (const tx of txs) {
       const result = stmtInsert.run(tx.id, tx.source, tx.type, tx.crypto, tx.amount, tx.price_eur, tx.total_eur, tx.fee_eur, tx.date, tx.raw_pair || null);
       if (result.changes === 1) imported++;
-      else skipped++;
+      else duplicates++;
     }
-    return { imported, skipped };
+    return { imported, duplicates };
   });
 
   return insertMany(txs);
@@ -61,9 +61,9 @@ router.post('/kraken', async (req, res, next) => {
     const privateKey = decrypt(privateKeyRow.value);
 
     const transactions = await fetchKrakenHistory(apiKey, privateKey);
-    const result       = bulkInsert(transactions);
+    const { imported, duplicates } = bulkInsert(transactions);
 
-    res.json(result);
+    res.json({ imported, duplicates, skipped: [] });
   } catch (err) {
     next(err);
   }
@@ -79,10 +79,10 @@ router.post('/binance', upload.single('file'), async (req, res, next) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const transactions = await parseBinanceCsv(req.file.buffer);
-    const result       = bulkInsert(transactions);
+    const { transactions, skipped } = await parseBinanceCsv(req.file.buffer);
+    const { imported, duplicates } = bulkInsert(transactions);
 
-    res.json(result);
+    res.json({ imported, duplicates, skipped });
   } catch (err) {
     next(err);
   }

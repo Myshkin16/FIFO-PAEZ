@@ -33,15 +33,23 @@ export default function ImportModal({ onClose, onSuccess }) {
     }
   }
 
+  const [showSkippedDetail, setShowSkippedDetail] = useState(false)
+
   async function handleBinance() {
     if (!binanceFile) return
     setBinanceLoading(true)
     setBinanceError(null)
     setBinanceResult(null)
+    setShowSkippedDetail(false)
     try {
       const data = await importBinance(binanceFile)
       setBinanceResult(data)
-      timerRef.current = setTimeout(() => { onSuccess(); onClose() }, 1000)
+      onSuccess()
+      // Auto-close only when there were no skipped rows — otherwise the user
+      // probably wants to read the warning before dismissing.
+      if (!data?.skipped || data.skipped.length === 0) {
+        timerRef.current = setTimeout(() => { onClose() }, 1500)
+      }
     } catch (err) {
       setBinanceError(err?.response?.data?.error || err.message || 'Error al importar')
     } finally {
@@ -117,7 +125,12 @@ export default function ImportModal({ onClose, onSuccess }) {
           </button>
           {krakenResult && (
             <div style={{ color: '#3fb950', fontSize: 12, marginTop: 8 }}>
-              Importadas {krakenResult.count ?? krakenResult.imported ?? '?'} operaciones
+              {krakenResult.imported ?? 0} importadas
+              {krakenResult.duplicates > 0 && (
+                <span style={{ color: '#8b949e' }}>
+                  {' · '}{krakenResult.duplicates} ya existían
+                </span>
+              )}
             </div>
           )}
           {krakenError && (
@@ -158,8 +171,56 @@ export default function ImportModal({ onClose, onSuccess }) {
             </button>
           </div>
           {binanceResult && (
-            <div style={{ color: '#3fb950', fontSize: 12, marginTop: 8 }}>
-              Importadas {binanceResult.count ?? binanceResult.imported ?? '?'} operaciones
+            <div style={{ marginTop: 8, fontSize: 12 }}>
+              <div style={{ color: '#3fb950' }}>
+                {binanceResult.imported ?? 0} importadas
+                {binanceResult.duplicates > 0 && (
+                  <span style={{ color: '#8b949e' }}>
+                    {' · '}{binanceResult.duplicates} ya existían
+                  </span>
+                )}
+                {binanceResult.skipped?.length > 0 && (
+                  <span style={{ color: '#d29922' }}>
+                    {' · '}{binanceResult.skipped.length} descartadas
+                  </span>
+                )}
+              </div>
+              {binanceResult.skipped?.length > 0 && (
+                <div style={{ marginTop: 6 }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowSkippedDetail(s => !s)}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: '#58a6ff',
+                      fontSize: 11,
+                      cursor: 'pointer',
+                      padding: 0,
+                      textDecoration: 'underline',
+                    }}
+                  >
+                    {showSkippedDetail ? 'Ocultar detalle' : 'Ver detalle de descartadas'}
+                  </button>
+                  {showSkippedDetail && (
+                    <ul style={{
+                      marginTop: 6,
+                      paddingLeft: 18,
+                      maxHeight: 140,
+                      overflowY: 'auto',
+                      color: '#8b949e',
+                      fontSize: 11,
+                      lineHeight: 1.5,
+                    }}>
+                      {binanceResult.skipped.map((s, i) => (
+                        <li key={i}>
+                          <strong style={{ color: '#d29922' }}>{s.reason}:</strong> {s.detail}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </div>
           )}
           {binanceError && (

@@ -1,10 +1,12 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import Resumen from './pages/Resumen'
 import Operaciones from './pages/Operaciones'
 import PorCrypto from './pages/PorCrypto'
 import Exportar from './pages/Exportar'
 import Config from './pages/Config'
+import { getFifoSummary } from './api/client'
 
 const NAV_LINKS = [
   { to: '/', label: 'Resumen', end: true },
@@ -74,16 +76,42 @@ const navLinkStyle = ({ isActive }) => ({
 })
 
 const currentYear = new Date().getFullYear()
-const YEARS = Array.from({ length: 6 }, (_, i) => currentYear - i)
+const DEFAULT_YEARS = Array.from({ length: 6 }, (_, i) => currentYear - i)
 
-export const YearContext = React.createContext({ year: new Date().getFullYear(), setYear: () => {} })
+export const YearContext = React.createContext({ year: currentYear, setYear: () => {} })
 
 export default function App() {
-  const [year, setYear] = useState(new Date().getFullYear())
+  const [year, setYear] = useState(currentYear)
+  const userPickedYear = useRef(false)
   const navigate = useNavigate()
 
+  // Pulls the per-year FIFO summary so we can default the selector to the
+  // most recent year that actually has operations. Without this, a fresh
+  // import of older data lands on a year with no records and looks empty.
+  const summaryQuery = useQuery({
+    queryKey: ['fifo-summary'],
+    queryFn: getFifoSummary,
+  })
+
+  const dataYears = (summaryQuery.data?.years || []).map(y => Number(y.year))
+
+  useEffect(() => {
+    if (dataYears.length === 0) return
+    if (userPickedYear.current) return
+    if (dataYears.includes(year)) return
+    setYear(Math.max(...dataYears))
+  }, [dataYears.join(',')])
+
+  const yearOptions = Array.from(new Set([...DEFAULT_YEARS, ...dataYears]))
+    .sort((a, b) => b - a)
+
+  const handleYearChange = (next) => {
+    userPickedYear.current = true
+    setYear(next)
+  }
+
   return (
-    <YearContext.Provider value={{ year, setYear }}>
+    <YearContext.Provider value={{ year, setYear: handleYearChange }}>
       <nav style={styles.navbar}>
         <div style={styles.logo}>₿ FIFO IRPF</div>
         <div style={styles.navLinks}>
@@ -95,9 +123,9 @@ export default function App() {
           <select
             style={styles.select}
             value={year}
-            onChange={e => setYear(Number(e.target.value))}
+            onChange={e => handleYearChange(Number(e.target.value))}
           >
-            {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+            {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
           </select>
           <button style={styles.importBtn} onClick={() => navigate('/config')}>
             + Importar

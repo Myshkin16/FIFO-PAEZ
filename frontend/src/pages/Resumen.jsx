@@ -44,6 +44,7 @@ export default function Resumen() {
 
   const gainLoss = Number(totals.gainLoss) || 0
   const taxEstimate = Number(totals.taxEstimate) || 0
+  const warningsCount = Number(totals.warningsCount) || 0
   const losses = results.reduce((acc, r) => {
     const g = Number(r.gainLoss) || 0
     return g < 0 ? acc + g : acc
@@ -83,7 +84,7 @@ export default function Resumen() {
       </div>
 
       {/* KPI cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: warningsCount > 0 ? 'repeat(5, 1fr)' : 'repeat(4, 1fr)', gap: 16, marginBottom: 20 }}>
         <KpiCard
           label="Ganancia neta"
           value={fmt(gainLoss)}
@@ -108,6 +109,14 @@ export default function Resumen() {
           subtext="suma de pérdidas"
           color="#f85149"
         />
+        {warningsCount > 0 && (
+          <KpiCard
+            label="Avisos"
+            value={warningsCount}
+            subtext="operaciones con aviso"
+            color="#d29922"
+          />
+        )}
       </div>
 
       {/* Chart + Crypto grid */}

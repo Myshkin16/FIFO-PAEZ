@@ -14,6 +14,7 @@ export const importBinance = (file) => {
   fd.append('file', file)
   return api.post('/import/binance', fd).then(r => r.data)
 }
+export const repricePrices = () => api.post('/fifo/reprice').then(r => r.data)
 export const exportCsv = (year) => {
   window.location.href = `/api/export/csv?year=${year}`
 }
