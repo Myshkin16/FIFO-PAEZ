@@ -1,0 +1,8 @@
+# Exclude the legacy local-only codebases from any Vercel deployment.
+# `backend/` uses better-sqlite3 (native module, writes to disk) and
+# `frontend/` is the original Vite project. Both are kept on `main` for
+# reference but are not part of the cloud deployment.
+backend/
+frontend/
+docs/
+README.md

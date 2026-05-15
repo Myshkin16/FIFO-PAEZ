@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "comment": "When running `vercel link` (Slice 3), set Root Directory = web. The project then deploys web/ as a Next.js app with all default commands. This file at the repo root is a fallback for ad-hoc `vercel deploy` invocations that don't set Root Directory.",
+  "buildCommand": "cd web && npm install && npm run build",
+  "outputDirectory": "web/.next",
+  "installCommand": "echo 'install handled in buildCommand'",
+  "framework": "nextjs"
+}
