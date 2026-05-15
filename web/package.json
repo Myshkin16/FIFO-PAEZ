@@ -10,6 +10,7 @@
     "db:seed-from-sqlite": "node --env-file=.env.local scripts/migrate-from-sqlite.js"
   },
   "dependencies": {
+    "@clerk/nextjs": "^7.3.4",
     "@neondatabase/serverless": "^1.1.0",
     "@tanstack/react-query": "^5.100.10",
     "axios": "^1.16.1",

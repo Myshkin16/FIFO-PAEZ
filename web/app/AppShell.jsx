@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
+import { UserButton } from '@clerk/nextjs'
 import { YearContext } from '@/lib/YearContext'
 import { getFifoSummary } from '@/lib/api/client'
 
@@ -147,6 +148,10 @@ function Shell({ children }) {
           <button style={styles.importBtn} onClick={() => router.push('/config')}>
             + Importar
           </button>
+          <UserButton
+            afterSignOutUrl="/sign-in"
+            appearance={{ elements: { avatarBox: { width: 28, height: 28 } } }}
+          />
         </div>
       </nav>
       <main style={styles.main}>{children}</main>
